@@ -133,8 +133,7 @@ LIMIT 5;
 WITH RecentFilms AS (
     SELECT film_id
     FROM film
-    WHERE release_year >= 2015
-)
+    WHERE release_year >= 2015)
 SELECT 
     a.first_name,
     a.last_name,
@@ -182,8 +181,7 @@ WITH TargetGenres AS (
     FROM film f
     INNER JOIN film_category fc using (film_id)
     INNER JOIN category c using (category_id)
-    WHERE c.name IN ('Drama', 'Travel', 'Documentary')
-)
+    WHERE c.name IN ('Drama', 'Travel', 'Documentary'))
 SELECT 
     f_years.release_year,
     COUNT(CASE WHEN tg.genre = 'Drama' THEN 1 END) AS number_of_drama_movies,
@@ -271,8 +269,7 @@ WITH StaffRevenue AS (
         MAX(p.payment_date) AS last_payment_date
     FROM  payment p
     WHERE EXTRACT(YEAR FROM p.payment_date) = 2017
-    GROUP BY p.staff_id
-),
+    GROUP BY p.staff_id),
 LastTransaction AS (
     SELECT 
         p.staff_id,
@@ -280,8 +277,7 @@ LastTransaction AS (
         i.store_id
     FROM  payment p
     INNER JOIN  rental r using (rental_id)
-    INNER JOIN  inventory i using (inventory_id)
-)
+    INNER JOIN  inventory i using (inventory_id))
 SELECT 
     s.first_name,
     s.last_name,
@@ -420,8 +416,7 @@ WITH LatestFilms AS (
     FROM public.film_actor fa
     INNER JOIN public.film f 
         ON fa.film_id = f.film_id
-    GROUP BY fa.actor_id
-)
+    GROUP BY fa.actor_id)
 SELECT 
     a.first_name,
     a.last_name,
@@ -494,8 +489,7 @@ WITH ActorFilms AS (
         f.release_year
     FROM public.film_actor fa
     INNER JOIN public.film f 
-        ON fa.film_id = f.film_id
-),
+        ON fa.film_id = f.film_id),
 NextFilms AS (
     SELECT 
         af1.actor_id,
@@ -507,8 +501,7 @@ NextFilms AS (
         AND af1.release_year < af2.release_year
     GROUP BY 
         af1.actor_id, 
-        af1.release_year
-)
+        af1.release_year)
 SELECT 
     a.first_name, 
     a.last_name,
@@ -521,3 +514,5 @@ GROUP BY
     a.first_name, 
     a.last_name
 ORDER BY max_career_gap DESC;
+
+-- if needed i would like to explain other details myself, but i think this is enough for now.
