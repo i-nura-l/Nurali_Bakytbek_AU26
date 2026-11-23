@@ -1,0 +1,191 @@
+Task 6
+ 
+1. What functions do
+ 
+film_in_stock - selects inventory_id from inventory where film_id = $1, store_id = $2 and
+inventory_in_stock(inventory_id) is true. So it gives ids of copies that are in store now. It has
+OUT p_film_count but returns ids, not count.
+ 
+film_not_in_stock - same query just with NOT inventory_in_stock, so copies that are rented out.
+ 
+inventory_in_stock - first counts all rentals of the copy, if 0 returns true. Then counts rentals
+where return_date IS NULL, if more than 0 returns false (someone has it), else true.
+ 
+get_customer_balance - 3 selects: sum of rental_rate of all rentals before the date, 1$ for every
+day over rental_duration (epoch / 86400), and sum of payments before the date. Returns
+fees + late fees - payments.
+ 
+inventory_held_by_customer - takes customer_id from rental where return_date IS NULL for this copy,
+so who has it now, or NULL.
+ 
+rewards_report - checks params = 0, takes month CURRENT_DATE - 3 months (first and last day with
+last_day), creates temp table tmpCustomer, with dynamic sql inserts customers whose SUM(amount) and
+COUNT in that month are bigger than params, returns customer rows and drops temp table.
+ 
+last_day - last day of month. If month 12 it does (year+1)-01-01 minus 1 day, else builds string
+year-(month+1)-01, casts to date and minus 1 day.
+ 
+ 
+2. Why rewards_report returns 0 rows
+ 
+It looks at CURRENT_DATE - 3 months (aug 2026) but all payments are from 2017, so nothing is found
+in that month and temp table stays empty. I changed it to take last full month that exists in payment
+(from MAX(payment_date)), removed temp table and dynamic sql, and check <= 0 and NULL (old one checked
+only = 0 so negative was ok). Now select * from rewards_report(7, 20) gives 3 customers.
+ 
+CREATE OR REPLACE FUNCTION public.rewards_report(min_monthly_purchases integer, min_dollar_amount_purchased numeric)
+RETURNS SETOF public.customer
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    last_month_start DATE;
+    last_month_end   DATE;
+BEGIN
+    IF min_monthly_purchases IS NULL OR min_monthly_purchases <= 0 THEN
+        RAISE EXCEPTION 'Minimum monthly purchases parameter must be > 0';
+    END IF;
+    IF min_dollar_amount_purchased IS NULL OR min_dollar_amount_purchased <= 0.00 THEN
+        RAISE EXCEPTION 'Minimum monthly dollar amount purchased parameter must be > $0.00';
+    END IF;
+ 
+    -- last full month with payments
+    SELECT (date_trunc('month', MAX(payment_date)) - INTERVAL '1 month')::date
+    INTO last_month_start
+    FROM payment;
+ 
+    IF last_month_start IS NULL THEN
+        RAISE EXCEPTION 'payment table is empty';
+    END IF;
+ 
+    last_month_end := (last_month_start + INTERVAL '1 month - 1 day')::date;
+ 
+    RETURN QUERY
+    SELECT c.*
+    FROM customer c
+    WHERE c.customer_id IN (
+        SELECT p.customer_id
+        FROM payment p
+        WHERE p.payment_date::date BETWEEN last_month_start AND last_month_end
+        GROUP BY p.customer_id
+        HAVING SUM(p.amount) > min_dollar_amount_purchased
+           AND COUNT(*) > min_monthly_purchases
+    );
+END;
+$$;
+ 
+ 
+3. What can be removed
+ 
+last_day can be one line: (date_trunc('month', d) + interval '1 month - 1 day')::date.
+group_concat and _group_concat do the same as string_agg(x, ', '), but views use them so views must
+be changed first. film_not_in_stock is a copy of film_in_stock with NOT, could be one function.
+Also in inventory_in_stock the first count is not needed, second query with LEFT JOIN already gives
+true when there are no rentals, so it reads rental 2 times for nothing and film_in_stock calls it
+for every copy.
+ 
+ 
+4. Best practices violations
+ 
+1) get_customer_balance uses old comma joins instead of JOIN ON, and DECIMAL(5,2) can overflow after 999.99
+2) rewards_report is SECURITY DEFINER without SET search_path
+3) rewards_report builds sql with string concat when its not needed, and creates temp table inside.
+if it fails in the middle table stays and next call fails with "relation already exists"
+4) rewards_report has hardcoded 3 months from today
+5) film_in_stock / film_not_in_stock OUT param name p_film_count but returns ids
+6) inventory_held_by_customer SELECT INTO without check, if many rows takes first one silently
+7) last_day is IMMUTABLE but EXTRACT on timestamptz depends on timezone
+8) almost no checks of input and no RAISE EXCEPTION
+ 
+ 
+5. get_customer_balance
+ 
+Comment has 4 rules. 1) rental fees and 4) payments are done. 2) late fee is done only for returned
+films, if return_date is NULL the CASE gives NULL and SUM skips it so not returned films are free.
+3) replacement_cost when overdue more than rental_duration * 2 is not done at all.
+ 
+In my version not returned film is counted till effective date. If overdue days > rental_duration * 2
+film counts as lost and replacement_cost is charged instead of day fees, else 1$ per day. Also normal
+joins, NUMERIC without (5,2), and exception if customer not found or date NULL.
+select get_customer_balance(1, now()) gives 215.80
+ 
+CREATE OR REPLACE FUNCTION public.get_customer_balance(p_customer_id integer, p_effective_date timestamp with time zone)
+RETURNS numeric
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_rentfees NUMERIC := 0;  -- 1)
+    v_overfees NUMERIC := 0;  -- 2)
+    v_replace  NUMERIC := 0;  -- 3)
+    v_payments NUMERIC := 0;  -- 4)
+BEGIN
+    IF p_customer_id IS NULL OR NOT EXISTS (SELECT 1 FROM customer WHERE customer_id = p_customer_id) THEN
+        RAISE EXCEPTION 'customer % not found', p_customer_id;
+    END IF;
+    IF p_effective_date IS NULL THEN
+        RAISE EXCEPTION 'effective date can not be null';
+    END IF;
+ 
+    WITH r AS (
+        SELECT f.rental_rate, f.rental_duration, f.replacement_cost,
+               -- not returned yet -> count till effective date
+               (LEAST(COALESCE(r.return_date, p_effective_date), p_effective_date)::date
+                - r.rental_date::date) - f.rental_duration AS days_over
+        FROM rental r
+        JOIN inventory i ON i.inventory_id = r.inventory_id
+        JOIN film f      ON f.film_id = i.film_id
+        WHERE r.customer_id = p_customer_id
+          AND r.rental_date <= p_effective_date
+    )
+    SELECT COALESCE(SUM(rental_rate), 0),
+           COALESCE(SUM(CASE WHEN days_over > 0 AND days_over <= rental_duration * 2 THEN days_over ELSE 0 END), 0),
+           COALESCE(SUM(CASE WHEN days_over > rental_duration * 2 THEN replacement_cost ELSE 0 END), 0)
+    INTO v_rentfees, v_overfees, v_replace
+    FROM r;
+ 
+    SELECT COALESCE(SUM(amount), 0) INTO v_payments
+    FROM payment
+    WHERE customer_id = p_customer_id
+      AND payment_date <= p_effective_date;
+ 
+    RETURN v_rentfees + v_overfees + v_replace - v_payments;
+END;
+$$;
+ 
+ 
+6. group_concat and _group_concat
+ 
+_group_concat(text, text) is sql function: if $2 NULL returns $1, if $1 NULL returns $2, else
+$1 || ', ' || $2. group_concat is an AGGREGATE with SFUNC _group_concat and STYPE text. State starts
+NULL, for every row postgres calls _group_concat(state, value), so first value becomes state and next
+ones are added with comma, NULLs are skipped. Result like 'a, b, c'. It came from MySQL version
+(sakila), now string_agg does same. Used in views actor_info, film_list and nicer_but_slower_film_list.
+ 
+ 
+7. last_updated
+ 
+Trigger function, does NEW.last_update = CURRENT_TIMESTAMP and RETURN NEW. Used in BEFORE UPDATE
+triggers on actor, address, category, city, country, customer, film, film_actor, film_category,
+inventory, language, rental, staff, store. So when row is updated last_update changes by itself.
+ 
+ 
+8. tmpSQL in rewards_report
+ 
+It is a text variable where INSERT INTO tmpCustomer (and later DROP TABLE) is built as string and then
+run with EXECUTE. It was done because temp table is created inside function and plpgsql caches plans,
+in old postgres cached plan on dropped and recreated temp table gave error, EXECUTE skips the cache.
+Yes it can be done without it. Temp table is not needed, same filter can be a subquery in
+RETURN QUERY, params are just numbers and table names are fixed so nothing is really dynamic.
+My version in 2 has no EXECUTE.
+ 
+ 
+9. Incorrect results
+ 
+1) get_customer_balance - not returned films have 0 late fee and no replacement cost, balance is lower
+than it should be. Also epoch / 86400 cuts part of day
+2) rewards_report - depends on today, on this db always 0 rows. Uses > not >= so customer with exactly
+min value is not included
+3) inventory_held_by_customer - if copy has 2 open rentals (bad data) returns any one
+4) last_day - with other timezone same moment can be other month, and IMMUTABLE lets postgres keep wrong value
+5) film_in_stock - param name says count but gives ids, easy to use it wrong
+ 
